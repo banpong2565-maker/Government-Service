@@ -59,10 +59,11 @@ def fetch_announcements() -> list[dict]:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
-        page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
+        page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
 
-        # รอเผื่อกรณี render ช้า
-        page.wait_for_timeout(3000)
+        # รอเผื่อกรณี render ช้า (หน้านี้มี background request ต่อเนื่อง
+        # เลยรอ networkidle ไม่ได้ ต้องรอแบบ fix เวลาแทน)
+        page.wait_for_timeout(8000)
 
         anchors = page.query_selector_all("a")
         for a in anchors:
