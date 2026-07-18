@@ -20,12 +20,15 @@ from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
+import re
+
 PORTAL_URL = "https://job.ocsc.go.th/portal"
 SEEN_FILE = Path(__file__).parent / "seen.json"
 LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 
-# คำที่มักปรากฏในลิงก์/ข้อความของประกาศรับสมัคร ใช้กรอง element ที่ไม่เกี่ยวข้องออก
-KEYWORDS = ["รับสมัคร", "ประกาศ", "สอบ", "คัดเลือก", "สรรหา", "บรรจุ"]
+# ประกาศจริงบนหน้านี้จะมี URL รูปแบบ /portal/news/<ตัวเลข> เสมอ
+# (ต่างจากลิงก์เมนูทั่วไปอย่าง /portal/faq, /portal/job-office เป็นต้น)
+NEWS_URL_PATTERN = re.compile(r"/portal/news/\d+")
 
 
 def load_seen() -> set:
@@ -75,7 +78,7 @@ def fetch_announcements() -> list[dict]:
 
             if not text or len(text) < 8:
                 continue
-            if not any(k in text for k in KEYWORDS):
+            if not NEWS_URL_PATTERN.search(href):
                 continue
 
             # ทำ href ให้เป็น absolute URL
@@ -88,10 +91,10 @@ def fetch_announcements() -> list[dict]:
 
         browser.close()
 
-    # ตัดรายการซ้ำ (title เดียวกัน)
+    # ตัดรายการซ้ำ โดยอิง URL (มีเลข id ประกาศ) แม่นกว่าอิงข้อความหัวข้อ
     unique = {}
     for item in results:
-        unique[item["title"]] = item
+        unique[item["url"]] = item
     return list(unique.values())
 
 
@@ -124,7 +127,7 @@ def main():
     print(f"พบประกาศทั้งหมด {len(announcements)} รายการบนหน้าเว็บ")
 
     seen = load_seen()
-    new_items = [a for a in announcements if a["title"] not in seen]
+    new_items = [a for a in announcements if a["url"] not in seen]
 
     if not new_items:
         print("ไม่มีประกาศใหม่")
@@ -135,7 +138,7 @@ def main():
     for item in new_items:
         message = f"📢 ประกาศใหม่ (งานราชการ)\n{item['title']}\n{item['url']}"
         send_line_broadcast(message, token)
-        seen.add(item["title"])
+        seen.add(item["url"])
         time.sleep(1)  # กันยิง API ถี่เกินไป
 
     save_seen(seen)
