@@ -91,7 +91,55 @@ def fetch_jobs() -> list[dict]:
     """
     ดึงประกาศรับสมัครตำแหน่งงานแต่ละอันจากหน้า job-office?type=1
     (URL รูปแบบ /portal/jobs/<id>) พร้อมชื่อหน่วยงาน ช่วงวันรับสมัคร และจำนวนอัตรา
+
+    หมายเหตุสำคัญ: หน้ารายการหลัก (job-office?type=N) แสดงแค่ "การ์ดหน่วยงาน"
+    (เช่น กรมการแพทย์ 22 อัตรา) เท่านั้น — ลิงก์ตำแหน่งงานย่อย /portal/jobs/<id>
+    จะปรากฏก็ต่อเมื่อเข้าไปที่หน้าของหน่วยงานนั้นๆ (/portal/search?department=<ชื่อ>)
+    แล้วเท่านั้น จึงต้องไล่เก็บลิงก์หน่วยงานทั้งหมดก่อน แล้วค่อยเข้าไปทีละหน่วยงาน
     """
+    # ประเภทบุคลากร 3 แท็บบนเว็บ: 1=ข้าราชการพลเรือน, 2=พนักงานราชการ, 3=บุคลากรประเภทอื่น
+    job_office_types = [1, 2, 3]
+    all_raw_jobs: dict[str, dict] = {}
+
+    extract_jobs_script = """
+        () => {
+            const jobs = new Map();
+            const anchors = Array.from(
+                document.querySelectorAll('a[href*="/portal/jobs/"]')
+            );
+            for (const a of anchors) {
+                const href = a.getAttribute('href') || '';
+                const match = href.match(/\\/portal\\/jobs\\/(\\d+)/);
+                if (!match) continue;
+                const id = match[1];
+                if (!jobs.has(id)) {
+                    jobs.set(id, { texts: [], blockText: '' });
+                }
+                const entry = jobs.get(id);
+                const text = (a.innerText || '').trim();
+                if (text) entry.texts.push(text);
+
+                let el = a;
+                for (let i = 0; i < 8 && el; i++) {
+                    el = el.parentElement;
+                    if (el && el.innerText && el.innerText.includes('อัตรา')) {
+                        if (el.innerText.length > entry.blockText.length
+                            || entry.blockText === '') {
+                            if (entry.blockText === '' ||
+                                el.innerText.length < entry.blockText.length + 400) {
+                                entry.blockText = el.innerText;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            return Array.from(jobs.entries()).map(([id, v]) => ({
+                id, texts: v.texts, blockText: v.blockText
+            }));
+        }
+        """
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             args=["--disable-blink-features=AutomationControlled"]
@@ -111,79 +159,74 @@ def fetch_jobs() -> list[dict]:
         )
         page = context.new_page()
 
-        raw_jobs = []
-        # ลองโหลดซ้ำสูงสุด 3 ครั้ง ถ้ายังไม่เจอลิงก์เลย (กันเคส CI โหลดช้า/พลาด)
-        for attempt in range(1, 4):
+        # --- ขั้นที่ 1: เก็บลิงก์การ์ดหน่วยงานจากทั้ง 3 แท็บ ---
+        department_urls: set[str] = set()
+
+        for job_type in job_office_types:
+            list_url = f"https://job.ocsc.go.th/portal/job-office?type={job_type}"
             try:
-                page.goto(JOBS_LIST_URL, wait_until="domcontentloaded", timeout=30000)
+                page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
             except Exception as e:
-                print(f"[DEBUG] page.goto timeout/error (attempt {attempt}): {e}")
+                print(f"[DEBUG] page.goto timeout/error (type={job_type}): {e}")
+                continue
 
-            page.wait_for_timeout(5000)
-
-            for _ in range(4):
-                page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1500)
+            page.wait_for_timeout(4000)
 
             try:
                 page.wait_for_selector(
-                    'a[href*="/portal/jobs/"]', timeout=20000
+                    'a[href*="/portal/search?department="]', timeout=15000
                 )
             except Exception:
                 pass
 
-            anchor_count = page.eval_on_selector_all(
-                'a[href*="/portal/jobs/"]', "els => els.length"
+            hrefs = page.eval_on_selector_all(
+                'a[href*="/portal/search?department="]',
+                "els => els.map(e => e.getAttribute('href'))",
             )
-            print(f"[DEBUG] (รอบที่ {attempt}) เจอลิงก์ /portal/jobs/ ทั้งหมด {anchor_count} ลิงก์")
+            print(f"[DEBUG] type={job_type}: เจอการ์ดหน่วยงาน {len(hrefs)} ใบ")
 
-            if anchor_count > 0:
-                break
-            print(f"[DEBUG] ยังไม่เจอลิงก์ — โหลดหน้าใหม่อีกครั้ง (attempt {attempt}/3)")
-            page.wait_for_timeout(3000)
+            for href in hrefs:
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = "https://job.ocsc.go.th" + href
+                department_urls.add(href)
 
-        print(f"[DEBUG] URL ปัจจุบันหลังโหลด: {page.url}")
+        print(f"[DEBUG] รวมหน่วยงานทั้งหมด (ไม่ซ้ำ) {len(department_urls)} หน่วยงาน")
 
-        raw_jobs = page.evaluate(
-            """
-            () => {
-                const jobs = new Map();
-                const anchors = Array.from(
-                    document.querySelectorAll('a[href*="/portal/jobs/"]')
-                );
-                for (const a of anchors) {
-                    const href = a.getAttribute('href') || '';
-                    const match = href.match(/\\/portal\\/jobs\\/(\\d+)/);
-                    if (!match) continue;
-                    const id = match[1];
-                    if (!jobs.has(id)) {
-                        jobs.set(id, { texts: [], blockText: '' });
-                    }
-                    const entry = jobs.get(id);
-                    const text = (a.innerText || '').trim();
-                    if (text) entry.texts.push(text);
+        # --- ขั้นที่ 2: เข้าไปทีละหน่วยงาน เก็บลิงก์ /portal/jobs/<id> ---
+        for i, dept_url in enumerate(sorted(department_urls), start=1):
+            try:
+                page.goto(dept_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                print(f"[DEBUG] เข้าไม่ถึงหน่วยงาน ({dept_url}): {e}")
+                continue
 
-                    let el = a;
-                    for (let i = 0; i < 8 && el; i++) {
-                        el = el.parentElement;
-                        if (el && el.innerText && el.innerText.includes('อัตรา')) {
-                            if (el.innerText.length > entry.blockText.length
-                                || entry.blockText === '') {
-                                if (entry.blockText === '' ||
-                                    el.innerText.length < entry.blockText.length + 400) {
-                                    entry.blockText = el.innerText;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                return Array.from(jobs.entries()).map(([id, v]) => ({
-                    id, texts: v.texts, blockText: v.blockText
-                }));
-            }
-            """
-        )
+            page.wait_for_timeout(2500)
+
+            try:
+                page.wait_for_selector('a[href*="/portal/jobs/"]', timeout=10000)
+            except Exception:
+                pass
+
+            raw_jobs = page.evaluate(extract_jobs_script)
+            print(f"[DEBUG] ({i}/{len(department_urls)}) {dept_url} -> {len(raw_jobs)} ตำแหน่ง")
+
+            for job in raw_jobs:
+                all_raw_jobs[job["id"]] = job
+
+        # --- DEBUG: เก็บ screenshot + HTML ของหน้าสุดท้ายไว้ตรวจสอบ ---
+        try:
+            debug_dir = Path(__file__).parent / "debug_output"
+            debug_dir.mkdir(exist_ok=True)
+            page.screenshot(path=str(debug_dir / "jobs_page.png"), full_page=True)
+            (debug_dir / "jobs_page.html").write_text(
+                page.content(), encoding="utf-8"
+            )
+            print(f"[DEBUG] บันทึก screenshot และ HTML ไว้ที่ {debug_dir} แล้ว")
+        except Exception as e:
+            print(f"[DEBUG] บันทึกไฟล์ debug ไม่สำเร็จ: {e}")
+        # --- END DEBUG ---
 
         browser.close()
 
@@ -191,7 +234,7 @@ def fetch_jobs() -> list[dict]:
     quota_pattern = re.compile(r"(\d[\d,]*)\s*อัตรา")
 
     results = []
-    for job in raw_jobs:
+    for job_id, job in all_raw_jobs.items():
         texts = [t for t in job["texts"] if t]
         if not texts:
             continue
@@ -207,10 +250,10 @@ def fetch_jobs() -> list[dict]:
             "title": title,
             "period": period_match.group(1).strip() if period_match else "",
             "quota": (quota_match.group(1) + " อัตรา") if quota_match else "",
-            "url": f"https://job.ocsc.go.th/portal/jobs/{job['id']}",
+            "url": f"https://job.ocsc.go.th/portal/jobs/{job_id}",
         })
 
-    print(f"[DEBUG] แปลงเป็นรายการตำแหน่งงานได้ {len(results)} รายการ")
+    print(f"[DEBUG] แปลงเป็นรายการตำแหน่งงานได้ {len(results)} รายการ (จาก {len(department_urls)} หน่วยงาน)")
     return results
 
 
