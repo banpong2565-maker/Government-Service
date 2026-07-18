@@ -99,7 +99,24 @@ def fetch_jobs() -> list[dict]:
         browser = p.chromium.launch()
         page = browser.new_page()
         page.goto(JOBS_LIST_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8000)
+        page.wait_for_timeout(5000)
+
+        # เผื่อรายการโหลดแบบ lazy/infinite-scroll: เลื่อนหน้าลงสองสามครั้ง
+        for _ in range(4):
+            page.mouse.wheel(0, 2000)
+            page.wait_for_timeout(1500)
+
+        # รอให้แน่ใจว่ามีลิงก์ /portal/jobs/ ปรากฏจริง ก่อนอ่าน DOM ต่อ
+        try:
+            page.wait_for_selector('a[href*="/portal/jobs/"]', timeout=15000)
+        except Exception:
+            pass
+
+        anchor_count = page.eval_on_selector_all(
+            'a[href*="/portal/jobs/"]', "els => els.length"
+        )
+        print(f"[DEBUG] เจอลิงก์ /portal/jobs/ ทั้งหมด {anchor_count} ลิงก์ (รวมซ้ำ)")
+        print(f"[DEBUG] URL ปัจจุบันหลังโหลด: {page.url}")
 
         raw_jobs = page.evaluate(
             """
@@ -168,12 +185,14 @@ def fetch_jobs() -> list[dict]:
             "url": f"https://job.ocsc.go.th/portal/jobs/{job['id']}",
         })
 
+    print(f"[DEBUG] แปลงเป็นรายการตำแหน่งงานได้ {len(results)} รายการ")
     return results
 
 
 def fetch_announcements() -> list[dict]:
     """รวมทั้งข่าวประกาศทั่วไปและประกาศรับสมัครตำแหน่งงานเข้าด้วยกัน"""
     news = fetch_news()
+    print(f"[DEBUG] เจอข่าวประกาศทั่วไป {len(news)} รายการ")
     jobs = fetch_jobs()
     return news + jobs
 
