@@ -23,12 +23,14 @@ from playwright.sync_api import sync_playwright
 import re
 
 PORTAL_URL = "https://job.ocsc.go.th/portal"
+JOBS_LIST_URL = "https://job.ocsc.go.th/portal/job-office?type=1"
 SEEN_FILE = Path(__file__).parent / "seen.json"
 LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 
-# ประกาศจริงบนหน้านี้จะมี URL รูปแบบ /portal/news/<ตัวเลข> เสมอ
-# (ต่างจากลิงก์เมนูทั่วไปอย่าง /portal/faq, /portal/job-office เป็นต้น)
+# ข่าวประกาศทั่วไปจากสำนักงาน ก.พ. จะมี URL รูปแบบ /portal/news/<ตัวเลข>
 NEWS_URL_PATTERN = re.compile(r"/portal/news/\d+")
+# ประกาศรับสมัครตำแหน่งงานแต่ละอัน จะมี URL รูปแบบ /portal/jobs/<ตัวเลข>
+JOBS_URL_PATTERN = re.compile(r"/portal/jobs/(\d+)")
 
 
 def load_seen() -> set:
@@ -48,24 +50,13 @@ def save_seen(seen: set) -> None:
     )
 
 
-def fetch_announcements() -> list[dict]:
-    """
-    เปิดหน้า portal ด้วย headless browser แล้วดึงลิงก์ประกาศทั้งหมด
-    เนื่องจากหน้านี้เป็น SPA (React/Vue) ต้องรอให้ JS render เสร็จก่อนอ่าน DOM
-
-    หมายเหตุ: ถ้าโครงสร้างหน้าเว็บมีการเปลี่ยนแปลง อาจต้องปรับ selector ด้านล่าง
-    วิธีหา selector ที่แม่นขึ้น: เปิดหน้าเว็บจริงในเบราว์เซอร์ -> กด F12 (DevTools)
-    -> คลิกขวาที่หัวข้อประกาศแต่ละอัน -> Inspect -> ดู class/tag ที่ครอบ แล้วมาแก้
-    ในฟังก์ชันนี้
-    """
+def fetch_news() -> list[dict]:
+    """ดึงข่าวประกาศทั่วไปจากหน้าแรกของ portal (URL รูปแบบ /portal/news/<id>)"""
     results = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
         page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
-
-        # รอเผื่อกรณี render ช้า (หน้านี้มี background request ต่อเนื่อง
-        # เลยรอ networkidle ไม่ได้ ต้องรอแบบ fix เวลาแทน)
         page.wait_for_timeout(8000)
 
         anchors = page.query_selector_all("a")
@@ -81,21 +72,110 @@ def fetch_announcements() -> list[dict]:
             if not NEWS_URL_PATTERN.search(href):
                 continue
 
-            # ทำ href ให้เป็น absolute URL
             if href.startswith("/"):
                 href = "https://job.ocsc.go.th" + href
             elif not href.startswith("http"):
                 href = PORTAL_URL
 
-            results.append({"title": text, "url": href})
+            results.append({"kind": "news", "title": text, "url": href})
 
         browser.close()
 
-    # ตัดรายการซ้ำ โดยอิง URL (มีเลข id ประกาศ) แม่นกว่าอิงข้อความหัวข้อ
     unique = {}
     for item in results:
         unique[item["url"]] = item
     return list(unique.values())
+
+
+def fetch_jobs() -> list[dict]:
+    """
+    ดึงประกาศรับสมัครตำแหน่งงานแต่ละอันจากหน้า job-office?type=1
+    (URL รูปแบบ /portal/jobs/<id>) พร้อมชื่อหน่วยงาน ช่วงวันรับสมัคร และจำนวนอัตรา
+
+    หมายเหตุ: หน้านี้อาจมีการแบ่งหน้า (pagination) หรือปุ่ม "โหลดเพิ่ม" ซึ่งสคริปต์นี้
+    ยังไม่รองรับ จะดึงได้เฉพาะรายการที่แสดงอยู่ในการโหลดครั้งแรกเท่านั้น
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(JOBS_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(8000)
+
+        raw_jobs = page.evaluate(
+            """
+            () => {
+                const jobs = new Map();
+                const anchors = Array.from(
+                    document.querySelectorAll('a[href*="/portal/jobs/"]')
+                );
+                for (const a of anchors) {
+                    const href = a.getAttribute('href') || '';
+                    const match = href.match(/\\/portal\\/jobs\\/(\\d+)/);
+                    if (!match) continue;
+                    const id = match[1];
+                    if (!jobs.has(id)) {
+                        jobs.set(id, { texts: [], blockText: '' });
+                    }
+                    const entry = jobs.get(id);
+                    const text = (a.innerText || '').trim();
+                    if (text) entry.texts.push(text);
+
+                    // เดินขึ้นไปหา container ที่มีคำว่า "อัตรา" (ใกล้สุดที่เจอ)
+                    let el = a;
+                    for (let i = 0; i < 8 && el; i++) {
+                        el = el.parentElement;
+                        if (el && el.innerText && el.innerText.includes('อัตรา')) {
+                            if (el.innerText.length > entry.blockText.length
+                                || entry.blockText === '') {
+                                if (entry.blockText === '' ||
+                                    el.innerText.length < entry.blockText.length + 400) {
+                                    entry.blockText = el.innerText;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                return Array.from(jobs.entries()).map(([id, v]) => ({
+                    id, texts: v.texts, blockText: v.blockText
+                }));
+            }
+            """
+        )
+
+        browser.close()
+
+    period_pattern = re.compile(r"เปิดรับสมัคร\s*([^\n]+)")
+    quota_pattern = re.compile(r"(\d[\d,]*)\s*อัตรา")
+
+    results = []
+    for job in raw_jobs:
+        texts = [t for t in job["texts"] if t]
+        if not texts:
+            continue
+        # ชื่อตำแหน่งมักยาวกว่าคำว่าประเภทบุคลากร (เช่น "ข้าราชการพลเรือน")
+        title = max(texts, key=len)
+
+        block = job.get("blockText", "") or ""
+        period_match = period_pattern.search(block)
+        quota_match = quota_pattern.search(block)
+
+        results.append({
+            "kind": "job",
+            "title": title,
+            "period": period_match.group(1).strip() if period_match else "",
+            "quota": (quota_match.group(1) + " อัตรา") if quota_match else "",
+            "url": f"https://job.ocsc.go.th/portal/jobs/{job['id']}",
+        })
+
+    return results
+
+
+def fetch_announcements() -> list[dict]:
+    """รวมทั้งข่าวประกาศทั่วไปและประกาศรับสมัครตำแหน่งงานเข้าด้วยกัน"""
+    news = fetch_news()
+    jobs = fetch_jobs()
+    return news + jobs
 
 
 def send_line_broadcast(message: str, token: str) -> None:
@@ -136,7 +216,17 @@ def main():
     print(f"พบประกาศใหม่ {len(new_items)} รายการ กำลังส่งแจ้งเตือน...")
 
     for item in new_items:
-        message = f"📢 ประกาศใหม่ (งานราชการ)\n{item['title']}\n{item['url']}"
+        if item["kind"] == "job":
+            extra_lines = []
+            if item.get("period"):
+                extra_lines.append(f"รับสมัคร: {item['period']}")
+            if item.get("quota"):
+                extra_lines.append(f"จำนวน: {item['quota']}")
+            extra = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
+            message = f"📢 เปิดรับสมัครตำแหน่งใหม่\n{item['title']}{extra}\n{item['url']}"
+        else:
+            message = f"📢 ประกาศใหม่ (งานราชการ)\n{item['title']}\n{item['url']}"
+
         send_line_broadcast(message, token)
         seen.add(item["url"])
         time.sleep(1)  # กันยิง API ถี่เกินไป
