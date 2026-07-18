@@ -114,7 +114,11 @@ def fetch_jobs() -> list[dict]:
         raw_jobs = []
         # ลองโหลดซ้ำสูงสุด 3 ครั้ง ถ้ายังไม่เจอลิงก์เลย (กันเคส CI โหลดช้า/พลาด)
         for attempt in range(1, 4):
-            page.goto(JOBS_LIST_URL, wait_until="networkidle", timeout=60000)
+            try:
+                page.goto(JOBS_LIST_URL, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                print(f"[DEBUG] page.goto timeout/error (attempt {attempt}): {e}")
+
             page.wait_for_timeout(5000)
 
             for _ in range(4):
