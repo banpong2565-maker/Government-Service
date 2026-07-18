@@ -16,6 +16,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -212,7 +213,13 @@ def fetch_jobs() -> list[dict]:
             raw_jobs = page.evaluate(extract_jobs_script)
             print(f"[DEBUG] ({i}/{len(department_urls)}) {dept_url} -> {len(raw_jobs)} ตำแหน่ง")
 
+            # ดึงชื่อหน่วยงานออกจาก query param ?department=<ชื่อ> ของ URL
+            qs = parse_qs(urlparse(dept_url).query)
+            department_name = unquote(qs.get("department", [""])[0]) or "หน่วยงานไม่ระบุชื่อ"
+
             for job in raw_jobs:
+                job["department"] = department_name
+                job["department_url"] = dept_url
                 all_raw_jobs[job["id"]] = job
 
         # --- DEBUG: เก็บ screenshot + HTML ของหน้าสุดท้ายไว้ตรวจสอบ ---
@@ -248,6 +255,8 @@ def fetch_jobs() -> list[dict]:
         results.append({
             "kind": "job",
             "title": title,
+            "department": job.get("department", ""),
+            "department_url": job.get("department_url", ""),
             "period": period_match.group(1).strip() if period_match else "",
             "quota": (quota_match.group(1) + " อัตรา") if quota_match else "",
             "url": f"https://job.ocsc.go.th/portal/jobs/{job_id}",
@@ -302,21 +311,43 @@ def main():
 
     print(f"พบประกาศใหม่ {len(new_items)} รายการ กำลังส่งแจ้งเตือน...")
 
-    for item in new_items:
-        if item["kind"] == "job":
-            extra_lines = []
-            if item.get("period"):
-                extra_lines.append(f"รับสมัคร: {item['period']}")
-            if item.get("quota"):
-                extra_lines.append(f"จำนวน: {item['quota']}")
-            extra = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
-            message = f"📢 เปิดรับสมัครตำแหน่งใหม่\n{item['title']}{extra}\n{item['url']}"
-        else:
-            message = f"📢 ประกาศใหม่ (งานราชการ)\n{item['title']}\n{item['url']}"
+    job_items = [item for item in new_items if item["kind"] == "job"]
+    news_items = [item for item in new_items if item["kind"] != "job"]
 
+    # --- จัดกลุ่มตำแหน่งงานใหม่ตามหน่วยงาน แล้วรวมเป็น 1 ข้อความต่อหน่วยงาน ---
+    jobs_by_department: dict[str, list[dict]] = {}
+    for item in job_items:
+        dept = item.get("department") or "หน่วยงานไม่ระบุชื่อ"
+        jobs_by_department.setdefault(dept, []).append(item)
+
+    for dept, jobs in jobs_by_department.items():
+        lines = [f"📢 {dept} เปิดรับสมัคร {len(jobs)} ตำแหน่ง"]
+        for idx, item in enumerate(jobs, start=1):
+            lines.append("")  # เว้นบรรทัดคั่นระหว่างตำแหน่ง
+            lines.append(f"{idx}. {item['title']}")
+            if item.get("period"):
+                lines.append(f"   รับสมัคร: {item['period']}")
+            if item.get("quota"):
+                lines.append(f"   จำนวน: {item['quota']}")
+
+        # ลิงก์เดียวท้ายข้อความ ไปยังหน้าหน่วยงานที่รวมทุกตำแหน่งไว้
+        dept_url = jobs[0].get("department_url") or ""
+        if dept_url:
+            lines.append("")
+            lines.append(f"ดูรายละเอียด: {dept_url}")
+
+        message = "\n".join(lines)
+        send_line_broadcast(message, token)
+        for item in jobs:
+            seen.add(item["url"])
+        time.sleep(1)  # กันยิง API ถี่เกินไป
+
+    # --- ข่าวประกาศทั่วไป ส่งทีละข้อความเหมือนเดิม ---
+    for item in news_items:
+        message = f"📢 ประกาศใหม่ (งานราชการ)\n{item['title']}\n{item['url']}"
         send_line_broadcast(message, token)
         seen.add(item["url"])
-        time.sleep(1)  # กันยิง API ถี่เกินไป
+        time.sleep(1)
 
     save_seen(seen)
     print("อัปเดต seen.json เรียบร้อย")
