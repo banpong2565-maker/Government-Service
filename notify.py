@@ -96,8 +96,19 @@ def fetch_jobs() -> list[dict]:
     ยังไม่รองรับ จะดึงได้เฉพาะรายการที่แสดงอยู่ในการโหลดครั้งแรกเท่านั้น
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="th-TH",
+            timezone_id="Asia/Bangkok",
+            extra_http_headers={"Accept-Language": "th-TH,th;q=0.9,en;q=0.8"},
+        )
+        page = context.new_page()
         page.goto(JOBS_LIST_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
@@ -117,6 +128,10 @@ def fetch_jobs() -> list[dict]:
         )
         print(f"[DEBUG] เจอลิงก์ /portal/jobs/ ทั้งหมด {anchor_count} ลิงก์ (รวมซ้ำ)")
         print(f"[DEBUG] URL ปัจจุบันหลังโหลด: {page.url}")
+        body_snippet = page.evaluate(
+            "() => (document.body.innerText || '').slice(0, 300)"
+        )
+        print(f"[DEBUG] เนื้อหาจริงบนหน้า (300 ตัวอักษรแรก): {body_snippet!r}")
 
         raw_jobs = page.evaluate(
             """
