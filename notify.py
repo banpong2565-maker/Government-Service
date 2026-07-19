@@ -246,16 +246,20 @@ def fetch_jobs() -> list[dict]:
     quota_line_pattern = re.compile(r"^\d[\d,]*\s*อัตรา$")
     date_range_pattern = re.compile(r"\d{1,2}\s*\S*\.?\s*\d{4}\s*-\s*\d{1,2}")
 
-    def extract_title(texts: list[str], department_name: str) -> str:
-        """แยกเฉพาะบรรทัดที่เป็นชื่อตำแหน่งจริง ตัดประเภทบุคลากร/ชื่อหน่วยงาน/
-        วันที่/จำนวนอัตรา/ยอดอ่าน ที่อาจติดมาด้วยถ้าการ์ดห่อด้วย <a> เดียวทั้งก้อน"""
+    def extract_title_and_type(texts: list[str], department_name: str) -> tuple[str, str]:
+        """แยกเฉพาะบรรทัดที่เป็นชื่อตำแหน่งจริง ตัดชื่อหน่วยงาน/วันที่/จำนวนอัตรา/
+        ยอดอ่าน ที่อาจติดมาด้วยถ้าการ์ดห่อด้วย <a> เดียวทั้งก้อน และแยกประเภทบุคลากร
+        (ข้าราชการพลเรือน/พนักงานราชการ/บุคลากรประเภทอื่น) ออกมาต่างหาก"""
         candidates = []
+        job_type = ""
         for t in texts:
             for line in t.splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 if line in personnel_types:
+                    if not job_type:
+                        job_type = line
                     continue
                 if department_name and line == department_name:
                     continue
@@ -268,10 +272,10 @@ def fetch_jobs() -> list[dict]:
                 if date_range_pattern.search(line):
                     continue
                 candidates.append(line)
-        if candidates:
-            return max(candidates, key=len)
-        # ถ้ากรองแล้วไม่เหลือเลย ใช้ข้อความยาวสุดจากเดิมเป็น fallback กันพัง
-        return max(texts, key=len) if texts else ""
+        title = max(candidates, key=len) if candidates else (
+            max(texts, key=len) if texts else ""
+        )
+        return title, job_type
 
     results = []
     for job_id, job in all_raw_jobs.items():
@@ -280,7 +284,7 @@ def fetch_jobs() -> list[dict]:
             continue
 
         department_name = job.get("department", "")
-        title = extract_title(texts, department_name)
+        title, job_type = extract_title_and_type(texts, department_name)
 
         # หาวันที่/อัตรา จากข้อความของลิงก์ตัวเองก่อน (แม่นยำกว่า)
         # ถ้าไม่เจอค่อย fallback ไปที่ blockText (container ข้างนอก)
@@ -293,6 +297,7 @@ def fetch_jobs() -> list[dict]:
         results.append({
             "kind": "job",
             "title": title,
+            "job_type": job_type,
             "department": department_name,
             "department_url": job.get("department_url", ""),
             "period": period_match.group(1).strip() if period_match else "",
@@ -359,14 +364,19 @@ def main():
         jobs_by_department.setdefault(dept, []).append(item)
 
     for dept, jobs in jobs_by_department.items():
-        # หาช่วงวันรับสมัครที่พบบ่อยที่สุดในกลุ่ม มาแสดงครั้งเดียวด้านบน
-        # (ปกติตำแหน่งในหน่วยงานเดียวกันมักเปิดรับพร้อมกันในช่วงเวลาเดียวกัน)
+        # หาช่วงวันรับสมัครและประเภทบุคลากรที่พบบ่อยที่สุดในกลุ่ม มาแสดงครั้งเดียวด้านบน
+        # (ปกติตำแหน่งในหน่วยงานเดียวกันมักเปิดรับพร้อมกันในช่วงเวลาเดียวกัน และเป็นประเภทเดียวกัน)
         periods = [item["period"] for item in jobs if item.get("period")]
         common_period = max(set(periods), key=periods.count) if periods else ""
+
+        job_types = [item["job_type"] for item in jobs if item.get("job_type")]
+        common_job_type = max(set(job_types), key=job_types.count) if job_types else ""
 
         lines = [f"📢 {dept} เปิดรับสมัคร {len(jobs)} ตำแหน่ง"]
         if common_period:
             lines.append(f"📅 รับสมัคร: {common_period}")
+        if common_job_type:
+            lines.append(f"👤 ประเภท: {common_job_type}")
 
         for idx, item in enumerate(jobs, start=1):
             lines.append("")  # เว้นบรรทัดคั่นระหว่างตำแหน่ง
