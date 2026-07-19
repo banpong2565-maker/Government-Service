@@ -240,22 +240,60 @@ def fetch_jobs() -> list[dict]:
     period_pattern = re.compile(r"เปิดรับสมัคร\s*([^\n]+)")
     quota_pattern = re.compile(r"(\d[\d,]*)\s*อัตรา")
 
+    # บรรทัดที่ไม่ใช่ชื่อตำแหน่งจริง ต้องกรองทิ้งตอนหา title
+    personnel_types = {"ข้าราชการพลเรือน", "พนักงานราชการ", "บุคลากรประเภทอื่น"}
+    read_count_pattern = re.compile(r"^อ่าน[\d,\s]*ครั้ง$")
+    quota_line_pattern = re.compile(r"^\d[\d,]*\s*อัตรา$")
+    date_range_pattern = re.compile(r"\d{1,2}\s*\S*\.?\s*\d{4}\s*-\s*\d{1,2}")
+
+    def extract_title(texts: list[str], department_name: str) -> str:
+        """แยกเฉพาะบรรทัดที่เป็นชื่อตำแหน่งจริง ตัดประเภทบุคลากร/ชื่อหน่วยงาน/
+        วันที่/จำนวนอัตรา/ยอดอ่าน ที่อาจติดมาด้วยถ้าการ์ดห่อด้วย <a> เดียวทั้งก้อน"""
+        candidates = []
+        for t in texts:
+            for line in t.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line in personnel_types:
+                    continue
+                if department_name and line == department_name:
+                    continue
+                if line.startswith("เปิดรับสมัคร"):
+                    continue
+                if read_count_pattern.match(line.replace(" ", "")):
+                    continue
+                if quota_line_pattern.match(line.replace(" ", "")):
+                    continue
+                if date_range_pattern.search(line):
+                    continue
+                candidates.append(line)
+        if candidates:
+            return max(candidates, key=len)
+        # ถ้ากรองแล้วไม่เหลือเลย ใช้ข้อความยาวสุดจากเดิมเป็น fallback กันพัง
+        return max(texts, key=len) if texts else ""
+
     results = []
     for job_id, job in all_raw_jobs.items():
         texts = [t for t in job["texts"] if t]
         if not texts:
             continue
-        # ชื่อตำแหน่งมักยาวกว่าคำว่าประเภทบุคลากร (เช่น "ข้าราชการพลเรือน")
-        title = max(texts, key=len)
 
+        department_name = job.get("department", "")
+        title = extract_title(texts, department_name)
+
+        # หาวันที่/อัตรา จากข้อความของลิงก์ตัวเองก่อน (แม่นยำกว่า)
+        # ถ้าไม่เจอค่อย fallback ไปที่ blockText (container ข้างนอก)
+        own_text = "\n".join(texts)
         block = job.get("blockText", "") or ""
-        period_match = period_pattern.search(block)
-        quota_match = quota_pattern.search(block)
+
+        period_match = period_pattern.search(own_text) or period_pattern.search(block)
+        quota_match = quota_pattern.search(own_text) or quota_pattern.search(block)
 
         results.append({
             "kind": "job",
             "title": title,
-            "department": job.get("department", ""),
+            "department": department_name,
             "department_url": job.get("department_url", ""),
             "period": period_match.group(1).strip() if period_match else "",
             "quota": (quota_match.group(1) + " อัตรา") if quota_match else "",
@@ -321,14 +359,23 @@ def main():
         jobs_by_department.setdefault(dept, []).append(item)
 
     for dept, jobs in jobs_by_department.items():
+        # หาช่วงวันรับสมัครที่พบบ่อยที่สุดในกลุ่ม มาแสดงครั้งเดียวด้านบน
+        # (ปกติตำแหน่งในหน่วยงานเดียวกันมักเปิดรับพร้อมกันในช่วงเวลาเดียวกัน)
+        periods = [item["period"] for item in jobs if item.get("period")]
+        common_period = max(set(periods), key=periods.count) if periods else ""
+
         lines = [f"📢 {dept} เปิดรับสมัคร {len(jobs)} ตำแหน่ง"]
+        if common_period:
+            lines.append(f"รับสมัคร: {common_period}")
+
         for idx, item in enumerate(jobs, start=1):
             lines.append("")  # เว้นบรรทัดคั่นระหว่างตำแหน่ง
             lines.append(f"{idx}. {item['title']}")
-            if item.get("period"):
-                lines.append(f"   รับสมัคร: {item['period']}")
             if item.get("quota"):
                 lines.append(f"   จำนวน: {item['quota']}")
+            # ถ้าตำแหน่งนี้วันรับสมัครไม่ตรงกับวันที่แสดงด้านบน ให้โชว์แยกกันไว้ กันข้อมูลหาย
+            if item.get("period") and item["period"] != common_period:
+                lines.append(f"   รับสมัคร: {item['period']}")
 
         # ลิงก์เดียวท้ายข้อความ ไปยังหน้าหน่วยงานที่รวมทุกตำแหน่งไว้
         dept_url = jobs[0].get("department_url") or ""
