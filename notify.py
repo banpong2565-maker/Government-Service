@@ -366,16 +366,13 @@ def main():
 
         lines = [f"📢 {dept} เปิดรับสมัคร {len(jobs)} ตำแหน่ง"]
         if common_period:
-            lines.append(f"รับสมัคร: {common_period}")
+            lines.append(f"📅 รับสมัคร: {common_period}")
 
         for idx, item in enumerate(jobs, start=1):
             lines.append("")  # เว้นบรรทัดคั่นระหว่างตำแหน่ง
             lines.append(f"{idx}. {item['title']}")
             if item.get("quota"):
                 lines.append(f"   จำนวน: {item['quota']}")
-            # ถ้าตำแหน่งนี้วันรับสมัครไม่ตรงกับวันที่แสดงด้านบน ให้โชว์แยกกันไว้ กันข้อมูลหาย
-            if item.get("period") and item["period"] != common_period:
-                lines.append(f"   รับสมัคร: {item['period']}")
 
         # ลิงก์เดียวท้ายข้อความ ไปยังหน้าหน่วยงานที่รวมทุกตำแหน่งไว้
         dept_url = jobs[0].get("department_url") or ""
